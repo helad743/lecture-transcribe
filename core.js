@@ -4,7 +4,7 @@
 // 전송되는 데이터: 녹음 조각(과 고른 강의 PDF)을 Google Gemini API로 직접 보낸다. 그 밖의 서버는 거치지 않는다.
 
 export const DEFAULT_MODEL = "gemini-flash-latest";
-export const MODELS = [DEFAULT_MODEL, "gemini-pro-latest", "gemini-4-argon"];
+export const MODELS = [DEFAULT_MODEL, "gemini-pro-latest", "gemini-4-argon", "gemini-4-hydrogen"];
 export const DEFAULT_CHUNK_MINUTES = 25;
 export const MAX_ATTEMPTS = 5;
 export const SILENCE_SEARCH_SECONDS = 30;
