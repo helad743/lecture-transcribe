@@ -34,13 +34,25 @@ export const PROMPT =
   "마지막 줄에는 '마지막 전사 위치: [MM:SS]' 형식으로 마지막으로 전사한 위치를 적어 주세요. " +
   "전사문 외의 인사말이나 설명은 쓰지 마세요.";
 export const PDF_RULE = "강의 PDF는 용어 철자 확인에만 참고하고, ";
+// 강의 PDF를 구간마다 통째로 보내는 대신, 처음 한 번만 보내 용어 목록을 뽑고 그 목록(텍스트)만 구간마다 보낸다
+export const GLOSSARY_RULE = "아래 '강의 용어 목록'은 강의 PDF에서 뽑은 것으로 용어 철자 확인에만 참고하고, ";
+export const GLOSSARY_BLOCK = "\n\n--- 강의 용어 목록 ---\n{glossary}\n--- 끝 ---";
+export const GLOSSARY_PROMPT =
+  "첨부한 강의 PDF에 나오는 영어 의학용어, 약물명, 약어, 질환·검사·사람 이름 같은 고유명사를 철자 그대로 뽑아 주세요.\n" +
+  "- 한 줄에 하나씩, 중복 없이, 번호나 설명 없이 목록만 출력하세요.\n" +
+  "- 일반적인 영어 단어는 빼고 강의 내용과 관련된 전문 용어만 넣으세요.";
+export const GLOSSARY_MAX_CHARS = 6000;
+// 받아 적기에는 깊은 추론이 필요 없다. 생각(thinking) 토큰은 출력 요금이라 '낮음'으로 요청한다(거절하는 모델은 설정 없이)
+export const THINKING_LEVEL = "low";
+export const TAIL_OVERLAP_SECONDS = 10;
+export const TAIL_EXCERPT_CHARS = 400;
 export const NO_MORE_SPEECH = "[이후 음성 없음]";
 export const TOPIC_PROMPT =
   "다음은 한국어·영어 혼용 의학 강의의 전사문입니다. 이 강의의 주제를 짧은 제목 하나로 정해 주세요.\n" +
   "- 한국어로 20자 안팎, 영어 의학용어는 영어 철자 그대로\n" +
   "- 제목 한 줄만 출력하고, 따옴표·마침표·'주제:' 같은 머리말이나 설명은 쓰지 마세요\n\n" +
   "--- 전사문 ---\n{transcript}\n--- 끝 ---";
-export const TOPIC_TRANSCRIPT_CHARS = 60000;
+export const TOPIC_TRANSCRIPT_CHARS = 12000;
 export const NOTES_PROMPT =
   "다음은 한국어·영어 혼용 의학 강의의 전사문입니다. 이 전사문으로 의대생 복습용 노트를 만들어 주세요.\n\n" +
   "규칙:\n" +
@@ -61,6 +73,12 @@ export const CONTINUE_PROMPT =
   "\n\n이 음성은 [{position}] 지점까지 이미 전사했습니다. [{position}] 이후부터 끝까지만 같은 규칙으로 이어서 " +
   "전사하고, 그 이전 내용은 다시 쓰지 마세요. [{position}] 이후에 말소리가 전혀 없으면 " +
   NO_MORE_SPEECH + " 한 줄만 출력하세요.";
+// 끊긴 지점 근처부터 잘라 낸 뒷부분 음성만 보낼 때(구간 전체를 다시 보내지 않아 토큰 절약)
+export const CONTINUE_TAIL_PROMPT =
+  "\n\n이 음성은 이미 전사한 부분에 이어지는 뒷부분입니다. 맨 앞 몇 초는 이미 전사한 내용과 겹치니, " +
+  "아래 '이미 전사한 마지막 부분' 다음 내용부터 같은 규칙으로 이어서 전사하세요. 시간은 이 음성 파일 기준으로 " +
+  "표시하세요. 이어서 전사할 말소리가 전혀 없으면 " + NO_MORE_SPEECH + " 한 줄만 출력하세요.\n" +
+  "--- 이미 전사한 마지막 부분 ---\n{excerpt}\n--- 끝 ---";
 
 const TIMESTAMP_RE = /\[(\d{1,3}):(\d{2})(?::(\d{2}))?\]/g;
 const LAST_POSITION_LINE_RE = /^.*마지막 전사 위치.*$\n?/gm;
@@ -115,10 +133,29 @@ export function lastPosition(text) {
 
 export const stripLastPositionLines = (text) => text.replace(LAST_POSITION_LINE_RE, "");
 
-export function buildPrompt(hasPdf, continueFrom = null) {
-  let prompt = PROMPT.replace("{pdf_rule}", hasPdf ? PDF_RULE : "");
-  if (continueFrom !== null) prompt += CONTINUE_PROMPT.replaceAll("{position}", formatTimestamp(continueFrom));
+export function buildPrompt(hasPdf, continueFrom = null, glossary = null, continueExcerpt = null) {
+  const rule = glossary ? GLOSSARY_RULE : hasPdf ? PDF_RULE : "";
+  let prompt = PROMPT.replace("{pdf_rule}", rule);
+  if (continueExcerpt !== null) prompt += CONTINUE_TAIL_PROMPT.replace("{excerpt}", () => continueExcerpt);
+  else if (continueFrom !== null) prompt += CONTINUE_PROMPT.replaceAll("{position}", formatTimestamp(continueFrom));
+  if (glossary) prompt += GLOSSARY_BLOCK.replace("{glossary}", () => glossary);
   return prompt;
+}
+
+// 모델이 뽑은 용어 목록에서 글머리표·번호를 떼고 중복을 없애, 한 줄에 하나씩 maxChars 안으로 자른다
+export function cleanGlossary(text, maxChars = GLOSSARY_MAX_CHARS) {
+  const terms = [], seen = new Set();
+  let total = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^[-=_*\s]*$/.test(line)) continue; // 빈 줄, '---' 같은 구분선
+    const term = line.replace(/^\s*(?:[-*•·]|\d+[.)])\s*/, "").trim().replace(/^[`*]+|[`*]+$/g, "");
+    if (!term || seen.has(term.toLowerCase())) continue;
+    if (total + term.length + 1 > maxChars) break;
+    seen.add(term.toLowerCase());
+    terms.push(term);
+    total += term.length + 1;
+  }
+  return terms.join("\n");
 }
 
 export const chunkHeader = (start, end) => `===== ${formatTimestamp(start)} ~ ${formatTimestamp(end)} =====`;
@@ -502,18 +539,47 @@ export class Gemini {
     try { await this._request(`${API}/v1beta/${name}`, { method: "DELETE" }); } catch { /* 48시간 뒤 자동 삭제됨 */ }
   }
 
-  async generate(model, parts) {
-    const res = await this._request(`${API}/v1beta/models/${model}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts }],
-        // 의학 강의는 질병·약물 이야기가 많아 기본 안전 필터에 잘못 걸릴 수 있어, 조절 가능한 필터는 끈다
-        safetySettings: SAFETY_CATEGORIES.map((category) => ({ category, threshold: "BLOCK_NONE" })),
-      }),
-    });
-    return res.json();
+  async generate(model, parts, log = () => {}) {
+    const body = {
+      contents: [{ role: "user", parts }],
+      // 의학 강의는 질병·약물 이야기가 많아 기본 안전 필터에 잘못 걸릴 수 있어, 조절 가능한 필터는 끈다
+      safetySettings: SAFETY_CATEGORIES.map((category) => ({ category, threshold: "BLOCK_NONE" })),
+    };
+    if (!noThinkingConfig.has(model)) body.generationConfig = { thinkingConfig: { thinkingLevel: THINKING_LEVEL } };
+    try {
+      const res = await this._request(`${API}/v1beta/models/${model}:generateContent`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      return res.json();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 400 && /thinking/i.test(e.message) && body.generationConfig) {
+        // 생각 수준 설정을 모르는 모델: 그 모델에는 설정 없이 다시 보낸다
+        noThinkingConfig.add(model);
+        log(`  ${model} 모델은 생각 줄이기 설정을 받지 않아, 기본 설정으로 다시 보냅니다.`);
+        return this.generate(model, parts, log);
+      }
+      throw e;
+    }
   }
+}
+
+export const noThinkingConfig = new Set(); // 생각 수준 설정을 거절한 모델들
+
+export class GeminiError extends Error {} // 사용자가 직접 해결해야 하는 오류(크레딧 소진, 잘못된 키 등)
+
+// API 오류를 사용자가 알아듣기 쉬운 한국어 오류로 바꾼다. 해당하지 않으면 그대로 돌려준다
+export function friendlyApiError(e) {
+  if (!(e instanceof ApiError)) return e;
+  const text = e.message;
+  if (e.code === 402 || /prepayment credits/i.test(text)) {
+    return new GeminiError("Gemini API 선불 크레딧이 다 떨어졌습니다. Google AI Studio의 결제(Billing)에서 충전한 뒤 " +
+      "다시 시도하세요. 끝난 구간은 저장돼 있어 이어서 진행합니다.");
+  }
+  if (e.code === 400 && /api key/i.test(text)) return new GeminiError("Gemini API 키가 올바르지 않습니다. 오른쪽 위 'API 키'로 다시 넣어 주세요.");
+  if (e.code === 403) return new GeminiError(`이 API 키로는 이 요청을 할 권한이 없습니다(모델 이름이나 키의 프로젝트를 확인하세요). (${text})`);
+  if (e.code === 404) return new GeminiError(`모델을 찾을 수 없습니다. 모델 이름을 확인하세요. (${text})`);
+  if (e.code === 429) return new GeminiError(`요청 한도(할당량)를 넘었습니다. 잠시 뒤 다시 시도하세요. (${text})`);
+  return e;
 }
 
 const filepart = (file) => ({ file_data: { mime_type: file.mimeType, file_uri: file.uri } });
@@ -529,7 +595,7 @@ async function withRetry(fn, log, shouldStop) {
       return await fn();
     } catch (e) {
       const transient = e instanceof ApiError && (e.code === 0 || e.code === 429 || e.code >= 500);
-      if (!transient || attempt === MAX_ATTEMPTS) throw e;
+      if (!transient || attempt === MAX_ATTEMPTS) throw friendlyApiError(e);
       const wait = timing.retryBaseSeconds * 2 ** (attempt - 1);
       log(`  일시적 오류(${e.code || "연결"} ${e.status}), ${wait}초 뒤 재시도합니다. (${attempt}/${MAX_ATTEMPTS - 1})`);
       for (let i = 0; i < wait; i++) { checkStop(shouldStop); await timing.sleep(1000); }
@@ -537,11 +603,26 @@ async function withRetry(fn, log, shouldStop) {
   }
 }
 
+export const newUsage = () => ({ input: 0, output: 0, audio: 0, thoughts: 0, requests: 0 });
+
 function addUsage(usage, response) {
   const meta = response.usageMetadata;
   if (!meta) return;
+  const thoughts = meta.thoughtsTokenCount || 0;
   usage.input += meta.promptTokenCount || 0;
-  usage.output += (meta.candidatesTokenCount || 0) + (meta.thoughtsTokenCount || 0);
+  usage.output += (meta.candidatesTokenCount || 0) + thoughts;
+  usage.thoughts += thoughts;
+  usage.requests += 1;
+  for (const d of meta.promptTokensDetails || []) if (/AUDIO$/i.test(d.modality || "")) usage.audio += d.tokenCount || 0;
+}
+
+// '입력 X / 출력 Y (음성 a, 생각 b, 요청 n번)' 형태의 한 줄 요약
+export function describeUsage(u) {
+  const details = [];
+  if (u.audio) details.push(`음성 ${u.audio.toLocaleString()}`);
+  if (u.thoughts) details.push(`생각 ${u.thoughts.toLocaleString()}`);
+  if (u.requests) details.push(`요청 ${u.requests}번`);
+  return `입력 ${u.input.toLocaleString()} / 출력 ${u.output.toLocaleString()}` + (details.length ? ` (${details.join(", ")})` : "");
 }
 
 export function responseText(response) {
@@ -573,21 +654,43 @@ export function describeEmptyResponse(response) {
 // ---------- 구간 전사 ----------
 
 // ctx: {gemini, model, log, shouldStop, usage, track, source}
+const uploadAudio = (ctx, bytes) => withRetry(
+  () => ctx.gemini.upload(new Blob([bytes], { type: "audio/aac" }), "audio/aac", "chunk.aac"), ctx.log, ctx.shouldStop);
+
+// ctx.glossary가 있으면 PDF 대신 그 용어 목록을 철자 참고용으로 붙인다
 export async function transcribeChunk(ctx, chunk, pdfFile) {
   const { gemini, model, log, shouldStop, usage } = ctx;
+  const glossary = ctx.glossary || null;
   const bytes = await buildAdts(ctx.track, ctx.source, chunk.startFrame, chunk.endFrame);
   log(`  오디오 업로드 중... (${(bytes.length / 1024 / 1024).toFixed(1)} MB)`);
-  const audio = await withRetry(() => gemini.upload(new Blob([bytes], { type: "audio/aac" }), "audio/aac", "chunk.aac"),
-    log, shouldStop);
+  const audio = await uploadAudio(ctx, bytes);
   try {
-    const files = pdfFile ? [audio, pdfFile] : [audio];
+    const extra = pdfFile ? [pdfFile] : [];
     // 재시도할 때 오디오를 다시 올리지 않도록, 업로드는 한 번만 하고 전사 요청만 반복한다
-    const request = async (continueFrom = null) => {
+    const request = async (audioFile = audio, continueFrom = null, continueExcerpt = null) => {
+      const prompt = buildPrompt(!!pdfFile, continueFrom, glossary, continueExcerpt);
       const response = await withRetry(
-        () => gemini.generate(model, [...files.map(filepart), { text: buildPrompt(!!pdfFile, continueFrom) }]),
-        log, shouldStop);
+        () => gemini.generate(model, [...[audioFile, ...extra].map(filepart), { text: prompt }], log), log, shouldStop);
       addUsage(usage, response);
       return [...responseText(response), response];
+    };
+    // 끊긴 지점 조금 앞부터의 뒷부분만 보내 이어서 전사한다(구간 전체를 다시 보내지 않아 토큰 절약)
+    const requestTail = async (position, textSoFar) => {
+      const start = position - TAIL_OVERLAP_SECONDS;
+      if (start <= 0) return null;
+      const origin = frameTime(ctx.track, chunk.startFrame);
+      const from = Math.max(frameAt(ctx.track, origin + start), chunk.startFrame);
+      if (from >= chunk.endFrame) return null;
+      const offset = frameTime(ctx.track, from) - origin;
+      const tailBytes = await buildAdts(ctx.track, ctx.source, from, chunk.endFrame);
+      log(`  ${formatTimestamp(offset)}부터 뒷부분 음성만 보냅니다. (${(tailBytes.length / 1024 / 1024).toFixed(1)} MB)`);
+      const tailFile = await uploadAudio(ctx, tailBytes);
+      try {
+        const excerpt = stripLastPositionLines(textSoFar).trimEnd().slice(-TAIL_EXCERPT_CHARS);
+        return [...(await request(tailFile, null, excerpt)), Math.round(offset)];
+      } finally {
+        await gemini.deleteFile(tailFile.name);
+      }
     };
 
     log("  전사 요청 중... (구간당 몇 분 걸릴 수 있습니다)");
@@ -615,16 +718,19 @@ export async function transcribeChunk(ctx, chunk, pdfFile) {
       if (attempt === MAX_CONTINUATIONS) break;
 
       log(`  ${formatTimestamp(position)}까지만 전사되어(구간 길이 ${formatTimestamp(chunk.duration)}) 그 뒤를 이어서 요청합니다.`);
-      let more;
+      let more, offset = 0;
       try {
         checkStop(shouldStop);
-        [more, truncated, response] = await request(position);
+        const tail = await requestTail(position, text);
+        if (tail) [more, truncated, response, offset] = tail;
+        else [more, truncated, response] = await request(audio, position);
       } catch (e) {
         if (e instanceof Cancelled) break; // 받은 앞부분은 '덜 끝난 구간'으로 저장되게 한다
         throw e;
       }
       if (!more) { log(`  이어서 요청했지만 본문 없는 응답을 받았습니다. (${describeEmptyResponse(response)})`); break; }
       if (more.includes(NO_MORE_SPEECH)) return [text, true];
+      if (offset) more = shiftTimestamps(more, offset); // 잘라 낸 뒷부분 기준 시간을 조각 기준으로 옮긴다
       const newPosition = lastPosition(more);
       if (newPosition === null || newPosition <= position) break; // 진전이 없으면 비용만 든다
       text = stripLastPositionLines(text).trimEnd() + "\n\n" + more;
@@ -688,10 +794,37 @@ export function stemOf(name) {
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
+// 강의 PDF는 처음 한 번만 보내 용어 목록을 뽑고, 구간마다는 그 목록만 보낸다(목록은 record에 저장해 다시 씀).
+// 목록을 못 뽑으면 예전처럼 PDF를 구간마다 붙인다 — 그때는 올린 PDF 파일을 돌려준다
+async function preparePdf(ctx, pdf, record) {
+  if (record.glossary) {
+    ctx.log(`강의 용어 목록: 저장해 둔 목록을 씁니다(${record.glossary.split("\n").length}개).`);
+    return null;
+  }
+  ctx.log("강의 PDF에서 용어 목록을 뽑는 중... (PDF는 이번 한 번만 보냅니다)");
+  const pdfFile = await withRetry(() => ctx.gemini.upload(pdf, "application/pdf", "lecture.pdf"), ctx.log, ctx.shouldStop);
+  let glossary = "";
+  try {
+    const response = await withRetry(
+      () => ctx.gemini.generate(ctx.model, [filepart(pdfFile), { text: GLOSSARY_PROMPT }], ctx.log), ctx.log, ctx.shouldStop);
+    addUsage(ctx.usage, response);
+    glossary = cleanGlossary(responseText(response)[0]);
+    if (!glossary) ctx.log(`경고: 강의 PDF에서 용어 목록을 받지 못해 PDF를 구간마다 그대로 보냅니다. (${describeEmptyResponse(response)})`);
+  } catch (e) {
+    if (e instanceof Cancelled || e instanceof GeminiError) { await ctx.gemini.deleteFile(pdfFile.name); throw e; }
+    ctx.log(`경고: 강의 PDF에서 용어 목록을 뽑지 못해 PDF를 구간마다 그대로 보냅니다. (${e.message})`);
+  }
+  if (!glossary) return pdfFile;
+  record.glossary = glossary;
+  ctx.log(`강의 용어 목록: ${glossary.split("\n").length}개를 뽑았습니다. 구간마다 PDF 대신 이 목록을 보냅니다.`);
+  await ctx.gemini.deleteFile(pdfFile.name);
+  return null;
+}
+
 async function suggestTopic(ctx, transcript) {
   try {
     const response = await withRetry(
-      () => ctx.gemini.generate(ctx.model, [{ text: TOPIC_PROMPT.replace("{transcript}", transcript.slice(0, TOPIC_TRANSCRIPT_CHARS)) }]),
+      () => ctx.gemini.generate(ctx.model, [{ text: TOPIC_PROMPT.replace("{transcript}", () => transcript.slice(0, TOPIC_TRANSCRIPT_CHARS)) }], ctx.log),
       ctx.log, ctx.shouldStop);
     addUsage(ctx.usage, response);
     const topic = cleanTopic(responseText(response)[0]);
@@ -715,7 +848,7 @@ async function makeNotes(ctx, record) {
     let response;
     try {
       response = await withRetry(
-        () => ctx.gemini.generate(ctx.model, [{ text: NOTES_PROMPT.replace("{transcript}", record.merged) }]),
+        () => ctx.gemini.generate(ctx.model, [{ text: NOTES_PROMPT.replace("{transcript}", () => record.merged) }], ctx.log),
         ctx.log, ctx.shouldStop);
     } catch (e) {
       if (e instanceof Cancelled) throw e;
@@ -748,7 +881,7 @@ export async function transcribeLecture(opts) {
   const model = opts.model || DEFAULT_MODEL;
   const chunkSeconds = (opts.chunkMinutes || DEFAULT_CHUNK_MINUTES) * 60;
   const source = blobSource(opts.file);
-  const usage = { input: 0, output: 0 };
+  const usage = newUsage();
   const blocked = [], incomplete = [];
 
   log("오디오를 구간으로 나누는 중...");
@@ -776,7 +909,7 @@ export async function transcribeLecture(opts) {
     if (record && Object.keys(record.parts || {}).length) {
       log("PDF·모델·구간 설정 중 달라진 것이 있어, 저장된 구간 결과를 버리고 처음부터 다시 전사합니다.");
     }
-    record = { ...(record || {}), key, fingerprint, parts: {}, partial: {}, topic: undefined };
+    record = { ...(record || {}), key, fingerprint, parts: {}, partial: {}, topic: undefined, glossary: undefined };
   }
   record.fileName = opts.file.name;
   record.updatedAt = Date.now();
@@ -784,8 +917,9 @@ export async function transcribeLecture(opts) {
   await save();
 
   const ctx = { gemini: opts.gemini, model, log, shouldStop: opts.shouldStop, usage, track, source };
+  Object.defineProperty(ctx, "glossary", { get: () => record.glossary || null });
   if (opts.progress) opts.progress(0, chunks.length);
-  let pdfFile = null;
+  let pdfFile = null, pdfReady = false;
   const parts = [];
   try {
     for (let i = 0; i < chunks.length; i++) {
@@ -797,14 +931,15 @@ export async function transcribeLecture(opts) {
         log(`[${i + 1}/${chunks.length}] ${label} 이미 전사됨, 건너뜀`);
         parts.push(record.parts[i]);
       } else {
-        if (opts.pdf && !pdfFile) {
-          log("강의 PDF 업로드 중...");
-          pdfFile = await withRetry(() => opts.gemini.upload(opts.pdf, "application/pdf", "lecture.pdf"), log, opts.shouldStop);
+        if (opts.pdf && !pdfReady) {
+          pdfReady = true;
+          pdfFile = await preparePdf(ctx, opts.pdf, record);
+          await save();
         }
         log(`[${i + 1}/${chunks.length}] ${label} 전사 중...`);
         const before = { ...usage };
         const [raw, complete] = await transcribeChunkResilient(ctx, chunk, pdfFile, blocked);
-        log(`  토큰: 입력 ${(usage.input - before.input).toLocaleString()} / 출력 ${(usage.output - before.output).toLocaleString()}`);
+        log(`  토큰: ${describeUsage(Object.fromEntries(Object.keys(usage).map((k) => [k, usage[k] - before[k]])))}`);
         let part = `${label}\n\n${shiftTimestamps(raw, chunk.start)}\n`;
         if (complete) {
           record.parts[i] = part;
@@ -842,7 +977,12 @@ export async function transcribeLecture(opts) {
   record.updatedAt = Date.now();
   await save();
 
-  if (usage.input || usage.output) log(`토큰 합계: 입력 ${usage.input.toLocaleString()} / 출력 ${usage.output.toLocaleString()}`);
+  if (usage.requests) {
+    log(`토큰 합계: ${describeUsage(usage)}`);
+    // 강의마다 쓴 토큰 기록(최근 20번). '저장된 결과'에 마지막 기록을 보여 준다
+    record.usageLog = [...(record.usageLog || []), { at: Date.now(), model, ...usage }].slice(-20);
+    await save();
+  }
   if (incomplete.length) log(`경고: 끝까지 전사되지 못한 구간이 ${incomplete.length}개 있습니다: ${incomplete.join(", ")}`);
   if (blocked.length) log(`경고: Gemini가 막아 전사하지 못한 대목이 ${blocked.length}곳 있습니다. 결과에서 '※ 여기부터'를 찾아보세요.`);
   return record;

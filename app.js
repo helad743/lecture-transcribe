@@ -246,9 +246,15 @@ async function start() {
         Object.assign(item, { status: "stopped", message: "중지됨 — 다시 시작하면 끝난 구간은 건너뛰고 이어서 합니다" });
         log("중지했습니다.");
       } else {
-        const hint = e instanceof core.ApiError && e.code === 400 && /API key/i.test(e.message) ? " API 키를 확인하세요." : "";
-        Object.assign(item, { status: "error", message: `오류: ${e.message}${hint} — 다시 시작하면 끝난 구간은 건너뜁니다` });
+        Object.assign(item, { status: "error", message: `오류: ${e.message} — 다시 시작하면 끝난 구간은 건너뜁니다` });
         log(`오류: ${e.message}`);
+        if (e instanceof core.GeminiError) {
+          // 크레딧 소진·잘못된 키처럼 다음 파일도 어차피 실패할 오류: 대기 중인 파일은 그대로 두고 멈춘다
+          log("이 오류는 다른 파일도 똑같이 실패하므로, 나머지는 대기 상태로 두고 멈춥니다. 해결한 뒤 '전사 시작'을 누르세요.");
+          renderQueue();
+          renderHistory();
+          break;
+        }
       }
     }
     renderQueue();
@@ -284,6 +290,13 @@ async function renderHistory() {
         className: "muted small", textContent: `${record.fileName} · ${new Date(record.updatedAt).toLocaleString("ko-KR")}`,
       }),
     );
+    const last = (record.usageLog || []).at(-1);
+    if (last) {
+      // 마지막으로 처리할 때 쓴 토큰(어디에 많이 쓰는지 볼 수 있게)
+      li.append(Object.assign(document.createElement("div"), {
+        className: "muted small", textContent: `마지막 처리 토큰(${last.model}): ${core.describeUsage(last)}`,
+      }));
+    }
     const { row, add } = resultButtons(record);
     add("삭제", async () => {
       if (!confirm(`"${record.name}" 결과를 이 휴대폰에서 지울까요? (되돌릴 수 없습니다)`)) return;
